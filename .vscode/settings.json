@@ -20,6 +20,7 @@
         "nvs_flash.h": "c",
         "event_groups.h": "c",
         "time.h": "c",
-        "freertos.h": "c"
+        "freertos.h": "c",
+        "sdmmc_defs.h": "c"
     }
 }
