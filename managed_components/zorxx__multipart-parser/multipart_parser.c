@@ -12,14 +12,14 @@
 
 static void multipart_log(const char * format, ...)
 {
-    va_list args;
-    va_start(args, format);
+    // va_list args;
+    // va_start(args, format);
 
-    char log_buffer[256]; // 로그 메시지를 저장할 버퍼 크기를 적절히 설정
-    vsnprintf(log_buffer, sizeof(log_buffer), format, args); // 메시지를 버퍼에 작성
+    // char log_buffer[256]; // 로그 메시지를 저장할 버퍼 크기를 적절히 설정
+    // vsnprintf(log_buffer, sizeof(log_buffer), format, args); // 메시지를 버퍼에 작성
 
-    ESP_LOGI("HTTP_MULTIPART_PARSER", "%s:%d: %s", __FILE__, __LINE__, log_buffer);
-    va_end(args);
+    // ESP_LOGI("HTTP_MULTIPART_PARSER", "%s:%d: %s", __FILE__, __LINE__, log_buffer);
+    // va_end(args);
 }
 
 #define NOTIFY_CB(FOR)                                                 \
@@ -125,13 +125,13 @@ size_t multipart_parser_execute(multipart_parser* p, const char *buf, size_t len
   char c, cl;
   int is_last = 0;
 
-  multipart_log("len %d %d", len, p->boundary_length);
-  multipart_log("bound %s", p->multipart_boundary);
+  // multipart_log("len %d %d", len, p->boundary_length);
+  // multipart_log("bound %s", p->multipart_boundary);
 
   while(i < len) {
     c = buf[i];
     is_last = (i == (len - 1));
-    multipart_log("i:  %d %d", i, p->state);
+    // multipart_log("i:  %d %d", i, p->state);
     switch (p->state) {
       case s_start:
         multipart_log("s_start");

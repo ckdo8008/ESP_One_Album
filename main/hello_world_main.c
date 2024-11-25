@@ -35,8 +35,10 @@
 #define RUN_TIME_SEC   60  // 런타임 (초 단위)
 #define INTERVAL_MS    10000 // 힙 메모리 표시 주기 (밀리초 단위)
 
-#define DEF_SSID "nurirobot"
-#define DEF_PW "nuri0625"
+// #define DEF_SSID "nurirobot"
+// #define DEF_PW "nuri0625"
+#define DEF_SSID "ckhome"
+#define DEF_PW "akwldrkz!1"
 #define STORAGE_PARTITION_LABEL "storage"
 
 static const char *TAG = "main";
@@ -340,181 +342,6 @@ const char* get_path_from_uri(char *dest, const char *base_path, const char *uri
     return dest + base_pathlen;
 }
 
-/* Handler to upload a file onto the server */
-// esp_err_t upload_post_handler(httpd_req_t *req)
-// {
-//     char filepath[512];
-//     FILE *file = NULL;
-//     int received;
-
-//     // MOUNT_POINT와 업로드된 파일 경로를 결합
-//     snprintf(filepath, sizeof(filepath), MOUNT_POINT "%s", req->uri + 7); // "/upload" 제거
-
-
-//     ESP_LOGI(TAG, "파일 생성 : %s %d", filepath, req->content_len);
-//     file = fopen(filepath, "w");
-//     if (!file) {
-//         ESP_LOGE(TAG, "파일 생성 실패: %s", filepath);
-//         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "파일 생성 실패");
-//         return ESP_FAIL;
-//     }
-
-//     char scratch[SCRATCH_BUFSIZE];
-//     int remaining = req->content_len;
-
-//     // ESP_LOGI(TAG, "파일 생성 start : %d", remaining);
-
-//     while (remaining > 0) {
-//         if ((received = httpd_req_recv(req, scratch, MIN(remaining, SCRATCH_BUFSIZE))) <= 0) {
-//             fclose(file);
-//             unlink(filepath); // 실패 시 파일 삭제
-//             ESP_LOGE(TAG, "파일 수신 실패");
-//             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "파일 수신 실패");
-//             return ESP_FAIL;
-//         }
-
-//         // ESP_LOGI(TAG, "파일 생성 : %d", remaining);
-//         if (received && (fwrite(scratch, 1, received, file) != received)) {
-//             ESP_LOGE(TAG, "파일 쓰기 실패1");
-//             fclose(file);
-//             ESP_LOGE(TAG, "파일 쓰기 실패2");
-//             unlink(filepath); // 실패 시 파일 삭제
-//             ESP_LOGE(TAG, "파일 쓰기 실패");
-//             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "파일 쓰기 실패");
-//             return ESP_FAIL;
-//         }
-
-//         remaining -= received;
-//     }
-
-//     fclose(file);
-//     // ESP_LOGI(TAG, "파일 업로드 완료: %s", filepath);
-//     // write_to_sdcard();
-//     httpd_resp_sendstr(req, "파일 업로드 성공");
-//     return ESP_OK;
-// }
-
-// esp_err_t upload_post_handler(httpd_req_t *req) {
-//     char filepath[512];
-//     FILE *file = NULL;
-//     char *boundary = NULL;
-//     char scratch[SCRATCH_BUFSIZE];
-//     char content_type[128];  // Content-Type 헤더 값 저장
-//     int received;
-//     bool is_file_field = false;
-//     size_t content_length = req->content_len;
-
-//     // Content-Type 헤더에서 boundary 추출
-//     if (httpd_req_get_hdr_value_str(req, "Content-Type", content_type, sizeof(content_type)) == ESP_OK) {
-//         char *boundary_str = strstr(content_type, "boundary=");
-//         if (boundary_str) {
-//             boundary = strdup(boundary_str + 9); // "boundary=" 이후 부분 복사
-//         }
-//     }
-
-//     if (!boundary) {
-//         ESP_LOGE(TAG, "Boundary를 찾을 수 없습니다.");
-//         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid multipart request");
-//         return ESP_FAIL;
-//     }
-//     ESP_LOGI(TAG, "Boundary: %s", boundary);
-
-//     int remaining = content_length; // 남은 본문 크기
-//     bool header_parsed = false;     // 현재 청크에서 헤더를 이미 처리했는지 여부
-
-//     while (remaining > 0) {
-//         received = httpd_req_recv(req, scratch, MIN(SCRATCH_BUFSIZE, remaining));
-//         if (received <= 0) {
-//             ESP_LOGE(TAG, "데이터 수신 실패");
-//             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to receive data");
-//             if (file) fclose(file);
-//             if (boundary) free(boundary);
-//             return ESP_FAIL;
-//         }
-//         remaining -= received;
-
-//         ESP_LOGI(TAG, "remaining: %d", remaining);
-
-//         char *data_start = scratch;
-//         char *data_end = scratch + received;
-
-//         // Boundary 처리
-//         if (strstr(data_start, boundary)) {
-//             if (file) {
-//                 fclose(file);
-//                 ESP_LOGI(TAG, "파일 저장 완료");
-//                 file = NULL;
-//             }
-//             is_file_field = false; // 새로운 part가 시작됨
-//             header_parsed = false; // 새로운 part에서는 헤더 다시 처리
-//             continue;
-//         }
-
-//         // 헤더 처리 (첫 번째 청크에서만 실행)
-//         if (!header_parsed) {
-//             char *body_start = strstr(data_start, "\r\n\r\n");
-//             if (body_start) {
-//                 body_start += 4; // 헤더 끝 ("\r\n\r\n") 건너뜀
-//                 size_t header_len = body_start - data_start;
-
-//                 char *content_disposition = strstr(data_start, "Content-Disposition:");
-//                 if (content_disposition) {
-//                     char *filename_start = strstr(content_disposition, "filename=\"");
-//                     if (filename_start) {
-//                         filename_start += 10; // "filename=\"" 건너뜀
-//                         char *filename_end = strchr(filename_start, '"');
-//                         if (filename_end) {
-//                             snprintf(filepath, sizeof(filepath), MOUNT_POINT "/%.*s",
-//                                      (int)(filename_end - filename_start), filename_start);
-//                             ESP_LOGI(TAG, "파일 경로: %s", filepath);
-//                             file = fopen(filepath, "w");
-//                             if (!file) {
-//                                 ESP_LOGE(TAG, "파일 생성 실패: %s", filepath);
-//                                 httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to create file");
-//                                 if (boundary) free(boundary);
-//                                 return ESP_FAIL;
-//                             }
-//                             is_file_field = true; // 파일 파트 시작
-//                         }
-//                     }
-//                 }
-
-//                 // 헤더 끝 이후 본문 데이터를 처리
-//                 size_t body_len = received - header_len;
-//                 if (is_file_field && file && body_len > 0) {
-//                     if (fwrite(body_start, 1, body_len, file) != body_len) {
-//                         ESP_LOGE(TAG, "파일 쓰기 실패");
-//                         fclose(file);
-//                         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to write to file");
-//                         if (boundary) free(boundary);
-//                         return ESP_FAIL;
-//                     }
-//                 }
-//                 header_parsed = true;
-//                 continue; // 다음 청크 처리
-//             }
-//         }
-
-//         // 본문 데이터 처리 (헤더가 이미 처리된 경우)
-//         if (is_file_field && file) {
-//             if (fwrite(data_start, 1, received, file) != received) {
-//                 ESP_LOGE(TAG, "파일 쓰기 실패");
-//                 fclose(file);
-//                 httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to write to file");
-//                 if (boundary) free(boundary);
-//                 return ESP_FAIL;
-//             }
-//         }
-//     }
-
-//     if (file) fclose(file);
-//     if (boundary) free(boundary);
-
-//     ESP_LOGI(TAG, "멀티파트 데이터 처리 완료");
-//     httpd_resp_sendstr(req, "File uploaded successfully");
-//     return ESP_OK;
-// }
-
 // HTTP POST 핸들러
 esp_err_t upload_post_handler(httpd_req_t *req)
 {
@@ -553,7 +380,7 @@ esp_err_t upload_post_handler(httpd_req_t *req)
             return ESP_FAIL;
         }
 
-        ESP_LOG_BUFFER_HEXDUMP(__FUNCTION__, &scratch, received, ESP_LOG_INFO);            
+        // ESP_LOG_BUFFER_HEXDUMP(__FUNCTION__, &scratch, received, ESP_LOG_INFO);            
 
         multipart_parser_execute(parser, scratch, received);
         remaining -= received;
