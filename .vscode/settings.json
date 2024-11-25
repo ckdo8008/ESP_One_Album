@@ -21,6 +21,14 @@
         "event_groups.h": "c",
         "time.h": "c",
         "freertos.h": "c",
-        "sdmmc_defs.h": "c"
+        "sdmmc_defs.h": "c",
+        "multipart_parser.h": "c",
+        "esp_log.h": "c",
+        "esp_netif.h": "c",
+        "stdlib.h": "c",
+        "task.h": "c",
+        "*.tcc": "c",
+        "format": "c",
+        "esp_sleep.h": "c"
     }
 }
