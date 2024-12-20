@@ -30,6 +30,7 @@
 #include "esp_vfs_fat.h"
 
 #include "multipart_parser.h"
+#include "driver/spi_common.h"
 
 #define SLEEP_TIME_SEC 60  // 슬립 시간 (초 단위)
 #define RUN_TIME_SEC   60  // 런타임 (초 단위)
@@ -39,6 +40,9 @@
 // #define DEF_PW "nuri0625"
 #define DEF_SSID "ckhome"
 #define DEF_PW "akwldrkz!1"
+
+#define SEC_SSID "nurirobot"
+#define SEC_PW "nuri0625"
 #define STORAGE_PARTITION_LABEL "storage"
 
 static const char *TAG = "main";
@@ -74,6 +78,23 @@ struct file_server_data {
 };
 static FILE *current_file = NULL;  // 현재 처리 중인 파일
 static char file_path[256];        // 저장할 파일 경로
+
+static wifi_config_t wifi_config = {
+    .sta = {
+        .ssid = DEF_SSID,
+        .password = DEF_PW
+        // .threshold.authmode = WIFI_AUTH_WPA2_PSK, // 필요한 경우 인증 모드 설정
+    },
+};
+
+static wifi_config_t wifi_config2 = {
+    .sta = {
+        .ssid = SEC_SSID,
+        .password = SEC_PW
+        // .threshold.authmode = WIFI_AUTH_WPA2_PSK, // 필요한 경우 인증 모드 설정
+    },
+};
+
 
 // 콜백 함수: 헤더 필드 처리
 static int handle_header_field(multipart_parser *p, const char *at, size_t length)
@@ -179,12 +200,24 @@ void init_sd_card()
         .quadhd_io_num = -1, // 사용하지 않음
         .max_transfer_sz = 4 * 1024,
     };
-
-    esp_err_t ret = spi_bus_initialize(host.slot, &bus_cfg, SPI_DMA_CH_AUTO);
+    
+    spi_device_interface_config_t devcfg = {
+#ifdef CONFIG_LCD_OVERCLOCK
+        .clock_speed_hz = 26 * 1000 * 1000,     //Clock out at 26 MHz
+#else
+        .clock_speed_hz = 10 * 1000 * 1000,     //Clock out at 10 MHz
+#endif
+        .mode = 0,                              //SPI mode 0
+        .spics_io_num = 15,             //CS pin
+        .queue_size = 7,                        //We want to be able to queue 7 transactions at a time
+    };
+    esp_err_t ret = spi_bus_initialize(host.slot, &bus_cfg, SPI_DMA_CH2);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SPI 버스 초기화 실패: %s", esp_err_to_name(ret));
         return;
     }
+
+    ESP_ERROR_CHECK(spi_bus_add_device(host.slot, &devcfg, &spi));
 
     // SD 카드 슬롯 설정
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
@@ -591,6 +624,7 @@ static void event_handler(void* arg, esp_event_base_t event_base,
     }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
     {
+        esp_wifi_set_config(WIFI_IF_STA, &wifi_config2);
         esp_wifi_connect();
         ESP_LOGI(TAG, "AP 연결 재시도 중...");
     }
@@ -677,13 +711,7 @@ void wifi_init(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 
     // Wi-Fi 설정
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = DEF_SSID,
-            .password = DEF_PW
-            // .threshold.authmode = WIFI_AUTH_WPA2_PSK, // 필요한 경우 인증 모드 설정
-        },
-    };
+
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
 
     // Wi-Fi 시작
