@@ -63,11 +63,66 @@ static bool wifi_initialized = false;
 #define MAX_FILE_SIZE   (200*1024) // 200 KB
 #define MAX_FILE_SIZE_STR "200KB"
 #define SCRATCH_BUFSIZE  1024
+#define PARALLEL_LINES 16
 
 #define MAX_BOUNDARY_LENGTH 256
 #define ERR(...) fprintf(stderr, __VA_ARGS__)
 #define INF(...) fprintf(stderr, __VA_ARGS__)
 #define DBG(...)
+
+#define EPD_SCK_PIN     14
+#define EPD_MOSI_PIN    13
+#define SPI_MISO_PIN    12
+#define EPD_CS_PIN      5
+#define EPD_DC_PIN      0
+#define EPD_RST_PIN     19
+#define EPD_BUSY_PIN    4
+#define EPD_PWR_PIN     26
+#define SD_CS_PIN       15
+
+static spi_device_handle_t epd_spi;
+static spi_device_handle_t sd_spi;
+
+#define EPD_4IN0E_WIDTH       400
+#define EPD_4IN0E_HEIGHT      600
+
+#define EPD_4IN0E_BLACK   0x0   /// 000
+#define EPD_4IN0E_WHITE   0x1   /// 001
+#define EPD_4IN0E_YELLOW  0x2   /// 010
+#define EPD_4IN0E_RED     0x3   /// 011
+#define EPD_4IN0E_BLUE    0x5   /// 101
+#define EPD_4IN0E_GREEN   0x6   /// 110
+
+typedef struct {
+    uint8_t cmd;
+    uint8_t data[16];
+    uint8_t databytes; //No of data in data; bit 7 = delay after set; 0xFF = end of cmds.
+} lcd_init_cmd_t;
+
+DRAM_ATTR static const lcd_init_cmd_t epd_init_cmds[] = {
+    {0xAA, {0x49, 0x55, 0x20, 0x08, 0x09, 0x18}, 6},
+    {0x01, {0x3f}, 1},
+    {0x00, {0x5f, 0x69}, 2},
+    {0x05, {0x40, 0x1f, 0x1f, 0x2c}, 4},
+    {0x08, {0x6f, 0x1f, 0x1f, 0x22}, 4},
+    {0x06, {0x6f, 0x1f, 0x17, 0x17}, 4},
+    {0x03, {0x00, 0x54, 0x00, 0x44}, 4},
+    {0x60, {0x02, 0x00}, 2},
+    {0x30, {0x08}, 1},
+    {0x50, {0x3f}, 1},
+    {0x61, {0x01, 0x90, 0x02, 0x58}, 4},
+    {0xe3, {0x2f}, 1},
+    {0x84, {0x01}, 1},
+    {0, {0}, 0xff},
+};
+
+DRAM_ATTR static const lcd_init_cmd_t epd_utils_cmds[] = {
+    {0x06, {0x6f, 0x1f, 0x17, 0x27}, 4},
+    {0x12, {0x00}, 1},
+    {0x02, {0x00}, 1},
+    {0x07, {0x00}, 1},
+    {0, {0}, 0xff},
+};
 
 struct file_server_data {
     /* Base path of file storage */
@@ -95,6 +150,35 @@ static wifi_config_t wifi_config2 = {
     },
 };
 
+void lcd_cmd(spi_device_handle_t spi, const uint8_t cmd, bool keep_cs_active)
+{
+    esp_err_t ret;
+    spi_transaction_t t;
+    memset(&t, 0, sizeof(t));       //Zero out the transaction
+    t.length = 8;                   //Command is 8 bits
+    t.tx_buffer = &cmd;             //The data is the cmd itself
+    t.user = (void*)0;              //D/C needs to be set to 0
+    if (keep_cs_active) {
+        t.flags = SPI_TRANS_CS_KEEP_ACTIVE;   //Keep CS active after data transfer
+    }
+    ret = spi_device_polling_transmit(spi, &t); //Transmit!
+    assert(ret == ESP_OK);          //Should have had no issues.
+}
+
+void lcd_data(spi_device_handle_t spi, const uint8_t *data, int len)
+{
+    esp_err_t ret;
+    spi_transaction_t t;
+    if (len == 0) {
+        return;    //no need to send anything
+    }
+    memset(&t, 0, sizeof(t));       //Zero out the transaction
+    t.length = len * 8;             //Len is in bytes, transaction length is in bits.
+    t.tx_buffer = data;             //Data
+    t.user = (void*)1;              //D/C needs to be set to 1
+    ret = spi_device_polling_transmit(spi, &t); //Transmit!
+    assert(ret == ESP_OK);          //Should have had no issues.
+}
 
 // 콜백 함수: 헤더 필드 처리
 static int handle_header_field(multipart_parser *p, const char *at, size_t length)
@@ -193,35 +277,30 @@ void init_sd_card()
     // SPI 호스트 초기화
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     spi_bus_config_t bus_cfg = {
-        .mosi_io_num = 13, // MOSI 핀
-        .miso_io_num = 12, // MISO 핀
-        .sclk_io_num = 14, // CLK 핀
-        .quadwp_io_num = -1, // 사용하지 않음
-        .quadhd_io_num = -1, // 사용하지 않음
-        .max_transfer_sz = 4 * 1024,
+        .miso_io_num = SPI_MISO_PIN,
+        .mosi_io_num = EPD_MOSI_PIN,
+        .sclk_io_num = EPD_SCK_PIN,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = PARALLEL_LINES * 320 * 2 + 8
     };
     
     spi_device_interface_config_t devcfg = {
 #ifdef CONFIG_LCD_OVERCLOCK
         .clock_speed_hz = 26 * 1000 * 1000,     //Clock out at 26 MHz
 #else
-        .clock_speed_hz = 10 * 1000 * 1000,     //Clock out at 10 MHz
+        .clock_speed_hz = 40 * 1000 * 1000,     //Clock out at 10 MHz
 #endif
         .mode = 0,                              //SPI mode 0
-        .spics_io_num = 15,             //CS pin
+        .spics_io_num = SD_CS_PIN,             //CS pin
         .queue_size = 7,                        //We want to be able to queue 7 transactions at a time
     };
-    esp_err_t ret = spi_bus_initialize(host.slot, &bus_cfg, SPI_DMA_CH2);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "SPI 버스 초기화 실패: %s", esp_err_to_name(ret));
-        return;
-    }
 
-    ESP_ERROR_CHECK(spi_bus_add_device(host.slot, &devcfg, &spi));
+    ESP_ERROR_CHECK(spi_bus_add_device(host.slot, &devcfg, &sd_spi));
 
     // SD 카드 슬롯 설정
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-    slot_config.gpio_cs = 15; // CS 핀
+    slot_config.gpio_cs = SD_CS_PIN; // CS 핀
     slot_config.host_id = host.slot;
 
     // FATFS 마운트 설정
@@ -232,7 +311,7 @@ void init_sd_card()
     };
 
     sdmmc_card_t *card;
-    ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
+    esp_err_t ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
 
     if (ret != ESP_OK) {
         if (ret == ESP_FAIL) {
@@ -264,21 +343,203 @@ void write_to_sdcard()
     ESP_LOGI(TAG, "파일 작성 완료: %s", file_path);
 }
 
-// void read_from_sdcard()
-// {
-//     const char *file_path = MOUNT_POINT "/test.txt";
-//     FILE *file = fopen(file_path, "r");
-//     if (!file) {
-//         ESP_LOGE(TAG, "파일 열기 실패: %s", file_path);
-//         return;
-//     }
-//     char line[128];
-//     while (fgets(line, sizeof(line), file) != NULL) {
-//         printf("%s", line);
-//     }
-//     fclose(file);
-//     ESP_LOGI(TAG, "파일 읽기 완료: %s", file_path);
-// }
+void gpio_init() 
+{
+    gpio_set_direction(EPD_BUSY_PIN, GPIO_MODE_INPUT);
+    gpio_set_direction(EPD_RST_PIN,  GPIO_MODE_OUTPUT);
+    gpio_set_direction(EPD_DC_PIN,   GPIO_MODE_OUTPUT);
+    gpio_set_direction(EPD_PWR_PIN,  GPIO_MODE_OUTPUT);
+    gpio_set_direction(EPD_CS_PIN,   GPIO_MODE_OUTPUT);
+    gpio_set_direction(SD_CS_PIN,   GPIO_MODE_OUTPUT);
+
+    gpio_set_level(EPD_PWR_PIN, 1);
+    gpio_set_level(EPD_CS_PIN,  1);
+    gpio_set_level(SD_CS_PIN,   0);
+}
+
+void epd_ReadBusyH() {
+    ESP_LOGI(TAG, "e-Paper busy H");
+    // LOW: busy, HIGH: idle
+    // 바뀐 논리에 따라, Busy 핀이 HIGH(1)가 될 때까지 대기
+    while (gpio_get_level(EPD_BUSY_PIN) == 0) {
+        vTaskDelay(pdMS_TO_TICKS(10));  // 10ms 대기
+    }
+
+    // Busy pin이 HIGH가 된 후 추가로 200ms 정도 대기
+    vTaskDelay(pdMS_TO_TICKS(200));
+    ESP_LOGI(TAG, "e-Paper busy H release");    
+}
+
+void epd_spi_pre_transfer_callback(spi_transaction_t *t)
+{
+    int dc = (int)t->user;
+    gpio_set_level(EPD_DC_PIN, dc);
+}
+
+void epd_reset() {
+    gpio_set_level(EPD_RST_PIN, 1);
+    vTaskDelay(pdMS_TO_TICKS(20));   // 20ms 지연
+    gpio_set_level(EPD_RST_PIN, 0);
+    vTaskDelay(pdMS_TO_TICKS(2));    // 2ms 지연
+    gpio_set_level(EPD_RST_PIN, 1);
+    vTaskDelay(pdMS_TO_TICKS(20));   // 20ms 지연    
+}
+
+void epd_init() {
+    epd_reset();
+    epd_ReadBusyH();
+    vTaskDelay(pdMS_TO_TICKS(30));
+    int cmd = 0;
+    while (epd_init_cmds[cmd].databytes != 0xff) {
+        lcd_cmd(epd_spi, epd_init_cmds[cmd].cmd, false);
+        lcd_data(epd_spi, epd_init_cmds[cmd].data, epd_init_cmds[cmd].databytes & 0x1F);
+        if (epd_init_cmds[cmd].databytes & 0x80) {
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+        }
+        cmd++;
+    }
+    epd_ReadBusyH();
+}
+
+
+void epd_turnondisplay() {
+    lcd_cmd(epd_spi, 0x04, false);
+    epd_ReadBusyH();
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    lcd_cmd(epd_spi, epd_utils_cmds[0].cmd, false);
+    lcd_data(epd_spi, epd_utils_cmds[0].data, epd_utils_cmds[0].databytes & 0x1F);
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    lcd_cmd(epd_spi, epd_utils_cmds[1].cmd, false);
+    lcd_data(epd_spi, epd_utils_cmds[1].data, epd_utils_cmds[1].databytes & 0x1F);
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    lcd_cmd(epd_spi, epd_utils_cmds[2].cmd, false);
+    lcd_data(epd_spi, epd_utils_cmds[2].data, epd_utils_cmds[2].databytes & 0x1F);
+    epd_ReadBusyH();
+    vTaskDelay(pdMS_TO_TICKS(200));    
+}
+
+void epd_sleep() {
+    lcd_cmd(epd_spi, epd_utils_cmds[3].cmd, false);
+    lcd_data(epd_spi, epd_utils_cmds[3].data, epd_utils_cmds[3].databytes & 0x1F);
+    epd_ReadBusyH();
+}
+
+void epd_clear(uint8_t color)
+{
+    // Width: 실제 픽셀의 절반 (2픽셀당 1바이트 구조 가정)
+    uint16_t Width = (EPD_4IN0E_WIDTH % 2 == 0)
+                   ? (EPD_4IN0E_WIDTH / 2)
+                   : (EPD_4IN0E_WIDTH / 2 + 1);
+    uint16_t Height = EPD_4IN0E_HEIGHT;
+
+    size_t buffer_size = Width * Height;
+    uint8_t *color_buffer = (uint8_t*)malloc(buffer_size);
+    if (!color_buffer) {
+        ESP_LOGE("EPD", "Failed to allocate color_buffer");
+        return;
+    }
+
+    // 버퍼 전체를 (color<<4 | color)로 채움
+    uint8_t fill_value = (color << 4) | color;
+    for (size_t i = 0; i < buffer_size; i++) {
+        color_buffer[i] = fill_value;
+    }
+
+    // 버퍼 전체를 한 번에 전송
+    // SOC_SPI_MAXIMUM_BUFFER_SIZE로 나누어 전송
+    lcd_cmd(epd_spi, 0x10, false);
+    size_t offset = 0;
+    while (offset < buffer_size) {
+        // 남은 데이터 중에서 chunk 크기 결정
+        size_t remain = buffer_size - offset;
+        size_t chunk_size = (remain > SOC_SPI_MAXIMUM_BUFFER_SIZE) 
+                            ? SOC_SPI_MAXIMUM_BUFFER_SIZE 
+                            : remain;
+
+        // color_buffer + offset 위치부터 chunk_size 바이트 전송
+        lcd_data(epd_spi, color_buffer + offset, chunk_size);
+
+        offset += chunk_size;
+    }
+
+    // 버퍼 해제
+    free(color_buffer);
+    // 디스플레이 갱신 명령
+    epd_turnondisplay();
+}
+
+void epad_init()
+{
+    gpio_init();
+
+    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    spi_bus_config_t buscfg = {
+        .miso_io_num = SPI_MISO_PIN,
+        .mosi_io_num = EPD_MOSI_PIN,
+        .sclk_io_num = EPD_SCK_PIN,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = PARALLEL_LINES * 320 * 2 + 8
+    };
+    
+    spi_device_interface_config_t devcfg = {
+#ifdef CONFIG_LCD_OVERCLOCK
+        .clock_speed_hz = 26 * 1000 * 1000,     //Clock out at 26 MHz
+#else
+        .clock_speed_hz = 40 * 1000 * 1000,     //Clock out at 10 MHz
+#endif
+        .mode = 0,                              //SPI mode 0
+        .spics_io_num = EPD_CS_PIN,             //CS pin
+        .queue_size = 7,                        //We want to be able to queue 7 transactions at a time
+        .pre_cb = epd_spi_pre_transfer_callback,
+    };
+
+    //Initialize the SPI bus
+    esp_err_t ret = spi_bus_initialize(host.slot, &buscfg, SPI_DMA_CH_AUTO);
+    ESP_ERROR_CHECK(ret);
+    //Attach the LCD to the SPI bus
+    ret = spi_bus_add_device(host.slot, &devcfg, &epd_spi);
+    ESP_ERROR_CHECK(ret);
+    ESP_LOGI(TAG, "========== 1");
+    epd_init();
+    ESP_LOGI(TAG, "========== 2");
+    epd_clear(EPD_4IN0E_WHITE);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    epd_sleep();
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    ESP_LOGI(TAG, "========== 3");
+    
+}
+
+void read_from_sdcard()
+{
+    const char *file_path = MOUNT_POINT "/test.txt";
+    FILE *file = fopen(file_path, "r");
+    if (!file) {
+        ESP_LOGE(TAG, "파일 열기 실패: %s", file_path);
+        return;
+    }
+    char line[128];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        printf("%s", line);
+    }
+    fclose(file);
+    ESP_LOGI(TAG, "파일 읽기 완료: %s", file_path);
+}
+
+void setSDCardMODE(bool arg) 
+{
+    if (arg) {
+        gpio_set_level(EPD_CS_PIN,  0);
+        gpio_set_level(SD_CS_PIN,   1);
+    } else {
+        gpio_set_level(EPD_CS_PIN,  1);
+        gpio_set_level(SD_CS_PIN,   0);
+    }
+}
 
 // SPIFFS 초기화
 void init_spiffs()
@@ -314,10 +575,10 @@ void init_spiffs()
         ESP_LOGE(TAG, "SPIFFS 디렉토리 열기 실패");
         return;
     }
-    ESP_LOGI(TAG, "SPIFFS 파일 목록:");
-    while ((entry = readdir(dir)) != NULL) {
-        ESP_LOGI(TAG, "  %s", entry->d_name);
-    }
+    // ESP_LOGI(TAG, "SPIFFS 파일 목록:");
+    // while ((entry = readdir(dir)) != NULL) {
+    //     ESP_LOGI(TAG, "  %s", entry->d_name);
+    // }
     closedir(dir);
 }
 
@@ -560,10 +821,15 @@ void start_web_server()
 // HTTP 서버 타스크
 void web_server_task(void *pvParameters)
 {
+    epad_init();
     init_spiffs();
+
+    setSDCardMODE(true);
     init_sd_card();
-    // write_to_sdcard();
-    // read_from_sdcard();
+    write_to_sdcard();
+    read_from_sdcard();
+    setSDCardMODE(false);
+
     start_web_server();
     vTaskDelete(NULL);
 }
