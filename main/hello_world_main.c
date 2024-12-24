@@ -476,7 +476,9 @@ void epd_display(const UBYTE *Image)
         lcd_data(epd_spi, Image + offset, chunk_size);
 
         offset += chunk_size;
-    }    
+    }  
+
+    epd_turnondisplay();  
 }
 
 void epd_displaypart(const UBYTE *Image, UWORD xstart, UWORD ystart, UWORD image_width, UWORD image_heigh)
