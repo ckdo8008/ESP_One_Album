@@ -36,7 +36,8 @@
         "spiffs_nucleus.h": "c",
         "spi_master.h": "c",
         "spi_hal.h": "c",
-        "spi_common.h": "c"
+        "spi_common.h": "c",
+        "gui_paint.h": "c"
     },
     "idf.port": "/dev/tty.usbserial-0001",
     "idf.espIdfPath": "/Users/changudo/esp/v5.3.1/esp-idf",

@@ -32,6 +32,10 @@
 #include "multipart_parser.h"
 #include "driver/spi_common.h"
 
+#include "Debug.h"
+#include "fonts.h"
+#include "GUI_Paint.h"
+
 #define SLEEP_TIME_SEC 60  // 슬립 시간 (초 단위)
 #define RUN_TIME_SEC   60  // 런타임 (초 단위)
 #define INTERVAL_MS    10000 // 힙 메모리 표시 주기 (밀리초 단위)
@@ -80,6 +84,7 @@ static bool wifi_initialized = false;
 #define EPD_PWR_PIN     26
 #define SD_CS_PIN       15
 
+sdmmc_host_t host = SDSPI_HOST_DEFAULT();
 static spi_device_handle_t epd_spi;
 static spi_device_handle_t sd_spi;
 
@@ -275,28 +280,15 @@ void init_sd_card()
     ESP_LOGI(TAG, "SD 카드(SPI) 초기화 중...");
 
     // SPI 호스트 초기화
-    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    spi_bus_config_t bus_cfg = {
-        .miso_io_num = SPI_MISO_PIN,
-        .mosi_io_num = EPD_MOSI_PIN,
-        .sclk_io_num = EPD_SCK_PIN,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = PARALLEL_LINES * 320 * 2 + 8
-    };
-    
-    spi_device_interface_config_t devcfg = {
-#ifdef CONFIG_LCD_OVERCLOCK
-        .clock_speed_hz = 26 * 1000 * 1000,     //Clock out at 26 MHz
-#else
-        .clock_speed_hz = 40 * 1000 * 1000,     //Clock out at 10 MHz
-#endif
-        .mode = 0,                              //SPI mode 0
-        .spics_io_num = SD_CS_PIN,             //CS pin
-        .queue_size = 7,                        //We want to be able to queue 7 transactions at a time
-    };
-
-    ESP_ERROR_CHECK(spi_bus_add_device(host.slot, &devcfg, &sd_spi));
+    // sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    // spi_bus_config_t bus_cfg = {
+    //     .miso_io_num = SPI_MISO_PIN,
+    //     .mosi_io_num = EPD_MOSI_PIN,
+    //     .sclk_io_num = EPD_SCK_PIN,
+    //     .quadwp_io_num = -1,
+    //     .quadhd_io_num = -1,
+    //     .max_transfer_sz = PARALLEL_LINES * 320 * 2 + 8
+    // };
 
     // SD 카드 슬롯 설정
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
@@ -376,18 +368,55 @@ void epd_spi_pre_transfer_callback(spi_transaction_t *t)
     gpio_set_level(EPD_DC_PIN, dc);
 }
 
+// void epd_reset_Ready() {
+//     ESP_LOGI(TAG, "e-Paper busy H");
+//     // LOW: busy, HIGH: idle
+//     // 바뀐 논리에 따라, Busy 핀이 HIGH(1)가 될 때까지 대기
+//     int elapsed_ms = 0;
+//     const int timeout_ms = 1000; 
+
+//     while (gpio_get_level(EPD_BUSY_PIN) != 0) { 
+//         // HIGH 이면 아직 Busy가 아님(또는 상태 이상)
+//         vTaskDelay(pdMS_TO_TICKS(10));
+//         elapsed_ms += 10;
+//         if (elapsed_ms == 500) {
+//            ESP_LOGE(TAG, "Busy pin did not go LOW within 1s. Forcing hardware reset.");
+
+//             // 리셋 신호
+//             gpio_set_level(EPD_RST_PIN, 0);
+//             vTaskDelay(pdMS_TO_TICKS(2));
+//             gpio_set_level(EPD_RST_PIN, 1);
+//             vTaskDelay(pdMS_TO_TICKS(20));            
+//         }
+
+//         if (elapsed_ms >= timeout_ms) esp_restart();
+//     }
+
+//     // Busy pin이 HIGH가 된 후 추가로 200ms 정도 대기
+//     vTaskDelay(pdMS_TO_TICKS(200));
+//     ESP_LOGI(TAG, "e-Paper busy H release");    
+// }    
+
 void epd_reset() {
+    gpio_set_level(EPD_RST_PIN, 0);
+    vTaskDelay(pdMS_TO_TICKS(20));    // 2ms 지연    
     gpio_set_level(EPD_RST_PIN, 1);
     vTaskDelay(pdMS_TO_TICKS(20));   // 20ms 지연
     gpio_set_level(EPD_RST_PIN, 0);
-    vTaskDelay(pdMS_TO_TICKS(2));    // 2ms 지연
+    vTaskDelay(pdMS_TO_TICKS(20));    // 2ms 지연
     gpio_set_level(EPD_RST_PIN, 1);
     vTaskDelay(pdMS_TO_TICKS(20));   // 20ms 지연    
+    epd_ReadBusyH();
 }
 
 void epd_init() {
+    gpio_set_level(EPD_PWR_PIN, 0);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    gpio_set_level(EPD_PWR_PIN, 1);
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     epd_reset();
-    epd_ReadBusyH();
+    // epd_ReadBusyH();
     vTaskDelay(pdMS_TO_TICKS(30));
     int cmd = 0;
     while (epd_init_cmds[cmd].databytes != 0xff) {
@@ -400,7 +429,6 @@ void epd_init() {
     }
     epd_ReadBusyH();
 }
-
 
 void epd_turnondisplay() {
     lcd_cmd(epd_spi, 0x04, false);
@@ -427,6 +455,76 @@ void epd_sleep() {
     epd_ReadBusyH();
 }
 
+void epd_display(const UBYTE *Image) 
+{
+    uint16_t Width = (EPD_4IN0E_WIDTH % 2 == 0)
+                   ? (EPD_4IN0E_WIDTH / 2)
+                   : (EPD_4IN0E_WIDTH / 2 + 1);
+    uint16_t Height = EPD_4IN0E_HEIGHT;
+
+    size_t buffer_size = Width * Height;
+    lcd_cmd(epd_spi, 0x10, false);
+    size_t offset = 0;
+    while (offset < buffer_size) {
+        // 남은 데이터 중에서 chunk 크기 결정
+        size_t remain = buffer_size - offset;
+        size_t chunk_size = (remain > SOC_SPI_MAXIMUM_BUFFER_SIZE) 
+                            ? SOC_SPI_MAXIMUM_BUFFER_SIZE 
+                            : remain;
+
+        // color_buffer + offset 위치부터 chunk_size 바이트 전송
+        lcd_data(epd_spi, Image + offset, chunk_size);
+
+        offset += chunk_size;
+    }    
+}
+
+void epd_displaypart(const UBYTE *Image, UWORD xstart, UWORD ystart, UWORD image_width, UWORD image_heigh)
+{
+    uint16_t Width = (EPD_4IN0E_WIDTH % 2 == 0)
+                   ? (EPD_4IN0E_WIDTH / 2)
+                   : (EPD_4IN0E_WIDTH / 2 + 1);
+    uint16_t Height = EPD_4IN0E_HEIGHT;
+
+    size_t buffer_size = Width * Height;
+    ESP_LOGI("EPD", "buffer_size: %d", buffer_size);
+    uint8_t *color_buffer = (uint8_t*)malloc(buffer_size);
+    if (!color_buffer) {
+        ESP_LOGE("EPD", "Failed to allocate color_buffer");
+        return;
+    }
+
+    for(int i=0; i<Height; i++) {
+		for(int j=0; j<Width; j++) {
+            size_t idx = i * Width + j;
+			if((i<(image_heigh+ystart)) && (i>=ystart) && (j<((image_width+xstart)/2)) && (j>=(xstart/2))) {
+                color_buffer[idx] = Image[(j-xstart/2) + (image_width/2*(i-ystart))];
+			}
+			else {
+                color_buffer[idx] = 0x11;
+			}
+		}
+	}    
+
+    lcd_cmd(epd_spi, 0x10, false);
+    size_t offset = 0;
+    while (offset < buffer_size) {
+        // 남은 데이터 중에서 chunk 크기 결정
+        size_t remain = buffer_size - offset;
+        size_t chunk_size = (remain > SOC_SPI_MAXIMUM_BUFFER_SIZE) 
+                            ? SOC_SPI_MAXIMUM_BUFFER_SIZE 
+                            : remain;
+
+        // color_buffer + offset 위치부터 chunk_size 바이트 전송
+        lcd_data(epd_spi, color_buffer + offset, chunk_size);
+
+        offset += chunk_size;
+    }
+
+    free(color_buffer);
+    epd_turnondisplay();
+}
+
 void epd_clear(uint8_t color)
 {
     // Width: 실제 픽셀의 절반 (2픽셀당 1바이트 구조 가정)
@@ -436,6 +534,7 @@ void epd_clear(uint8_t color)
     uint16_t Height = EPD_4IN0E_HEIGHT;
 
     size_t buffer_size = Width * Height;
+    ESP_LOGI("EPD", "buffer_size: %d", buffer_size);
     uint8_t *color_buffer = (uint8_t*)malloc(buffer_size);
     if (!color_buffer) {
         ESP_LOGE("EPD", "Failed to allocate color_buffer");
@@ -471,11 +570,9 @@ void epd_clear(uint8_t color)
     epd_turnondisplay();
 }
 
-void epad_init()
+void spi_init() 
 {
-    gpio_init();
-
-    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    
     spi_bus_config_t buscfg = {
         .miso_io_num = SPI_MISO_PIN,
         .mosi_io_num = EPD_MOSI_PIN,
@@ -486,11 +583,7 @@ void epad_init()
     };
     
     spi_device_interface_config_t devcfg = {
-#ifdef CONFIG_LCD_OVERCLOCK
-        .clock_speed_hz = 26 * 1000 * 1000,     //Clock out at 26 MHz
-#else
         .clock_speed_hz = 40 * 1000 * 1000,     //Clock out at 10 MHz
-#endif
         .mode = 0,                              //SPI mode 0
         .spics_io_num = EPD_CS_PIN,             //CS pin
         .queue_size = 7,                        //We want to be able to queue 7 transactions at a time
@@ -500,18 +593,70 @@ void epad_init()
     //Initialize the SPI bus
     esp_err_t ret = spi_bus_initialize(host.slot, &buscfg, SPI_DMA_CH_AUTO);
     ESP_ERROR_CHECK(ret);
-    //Attach the LCD to the SPI bus
+
     ret = spi_bus_add_device(host.slot, &devcfg, &epd_spi);
-    ESP_ERROR_CHECK(ret);
-    ESP_LOGI(TAG, "========== 1");
+    ESP_ERROR_CHECK(ret);    
+
+    spi_device_interface_config_t devcfg1 = {
+        .clock_speed_hz = 40 * 1000 * 1000,     //Clock out at 10 MHz
+        .mode = 0,                              //SPI mode 0
+        .spics_io_num = SD_CS_PIN,             //CS pin
+        .queue_size = 7,                        //We want to be able to queue 7 transactions at a time
+    };
+
+    ESP_ERROR_CHECK(spi_bus_add_device(host.slot, &devcfg1, &sd_spi));    
+}
+
+void epad_init()
+{
+    //Attach the LCD to the SPI bus
     epd_init();
-    ESP_LOGI(TAG, "========== 2");
-    epd_clear(EPD_4IN0E_WHITE);
-    vTaskDelay(pdMS_TO_TICKS(500));
-    epd_sleep();
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    ESP_LOGI(TAG, "========== 3");
+    // epd_clear(EPD_4IN0E_WHITE);
+    // vTaskDelay(pdMS_TO_TICKS(500));
+
+    UBYTE *Image;
+    // // UWORD Imagesize = ((EPD_4IN0E_WIDTH % 2 == 0)? (EPD_4IN0E_WIDTH / 2 ): (EPD_4IN0E_WIDTH / 2 + 1)) * EPD_4IN0E_HEIGHT;
+    // // Image = (UBYTE *)malloc(Imagesize/6);
+    // // Paint_NewImage(Image, EPD_4IN0E_WIDTH/2, EPD_4IN0E_HEIGHT/3, 0, EPD_4IN0E_WHITE);
+    // UWORD Imagesize = 200 * 200;
+    // Image = (UBYTE *)malloc(Imagesize);
+    // Paint_NewImage(Image, 200, 200, 0, EPD_4IN0E_WHITE);    
+    // Paint_SetScale(6);
+    // Paint_SelectImage(Image);
+    // Paint_Clear(EPD_4IN0E_WHITE);    
+    // Paint_DrawPoint(10, 80, EPD_4IN0E_RED, DOT_PIXEL_1X1, DOT_STYLE_DFT);
+    // Paint_DrawPoint(10, 90, EPD_4IN0E_BLUE, DOT_PIXEL_2X2, DOT_STYLE_DFT);
+    // Paint_DrawPoint(10, 100, EPD_4IN0E_GREEN, DOT_PIXEL_3X3, DOT_STYLE_DFT);
+    // Paint_DrawRectangle(1, 1, 200, 200, EPD_4IN0E_BLACK, DOT_PIXEL_1X1, DRAW_FILL_EMPTY);
+    // Paint_DrawLine(20, 70, 70, 120, EPD_4IN0E_YELLOW, DOT_PIXEL_1X1, LINE_STYLE_SOLID);
+    // Paint_DrawLine(70, 70, 20, 120, EPD_4IN0E_YELLOW, DOT_PIXEL_1X1, LINE_STYLE_SOLID);
+    // Paint_DrawRectangle(20, 70, 70, 120, EPD_4IN0E_BLACK, DOT_PIXEL_1X1, DRAW_FILL_EMPTY);
+    // Paint_DrawRectangle(80, 70, 130, 120, EPD_4IN0E_BLACK, DOT_PIXEL_1X1, DRAW_FILL_FULL);
+    // Paint_DrawCircle(45, 95, 20, EPD_4IN0E_BLACK, DOT_PIXEL_1X1, DRAW_FILL_EMPTY);
+    // Paint_DrawCircle(105, 95, 20, EPD_4IN0E_WHITE, DOT_PIXEL_1X1, DRAW_FILL_FULL);
+    // Paint_DrawLine(85, 95, 125, 95, EPD_4IN0E_YELLOW, DOT_PIXEL_1X1, LINE_STYLE_DOTTED);
+    // Paint_DrawLine(105, 75, 105, 115, EPD_4IN0E_YELLOW, DOT_PIXEL_1X1, LINE_STYLE_DOTTED);
+    // Paint_DrawNum(10, 33, 123456789, &Font12, EPD_4IN0E_BLACK, EPD_4IN0E_WHITE);
+    // Paint_DrawNum(10, 50, 987654321, &Font16, EPD_4IN0E_WHITE, EPD_4IN0E_BLACK);
     
+    // Paint_DrawString_EN(145, 0, "Waveshare", &Font16, EPD_4IN0E_BLACK, EPD_4IN0E_WHITE);
+    // Paint_DrawString_EN(145, 35, "Waveshare", &Font16, EPD_4IN0E_BLACK, EPD_4IN0E_WHITE);
+    // Paint_DrawString_EN(145, 70, "Waveshare", &Font16, EPD_4IN0E_BLACK, EPD_4IN0E_WHITE);
+    // Paint_DrawString_EN(145, 104, "Waveshare", &Font16, EPD_4IN0E_BLACK, EPD_4IN0E_WHITE);
+    // Paint_DrawString_EN(145, 140, "Waveshare", &Font16, EPD_4IN0E_BLACK, EPD_4IN0E_WHITE);
+    // epd_displaypart(Image, 100, 150, 200, 200);
+
+    UWORD Imagesize = EPD_4IN0E_WIDTH * EPD_4IN0E_HEIGHT;
+    Image = (UBYTE *)malloc(Imagesize);
+    Paint_NewImage(Image, EPD_4IN0E_WIDTH, EPD_4IN0E_HEIGHT, 0, EPD_4IN0E_WHITE);   
+    Paint_SetScale(6);
+    Paint_SelectImage(Image);
+    Paint_Clear(EPD_4IN0E_BLACK);
+    epd_display(Image);
+    epd_sleep();
+
+    free(Image);
+    vTaskDelay(pdMS_TO_TICKS(500));
 }
 
 void read_from_sdcard()
@@ -821,16 +966,20 @@ void start_web_server()
 // HTTP 서버 타스크
 void web_server_task(void *pvParameters)
 {
-    epad_init();
+    start_web_server();
+
+    gpio_init();
+    spi_init();
+
     init_spiffs();
 
-    setSDCardMODE(true);
-    init_sd_card();
-    write_to_sdcard();
-    read_from_sdcard();
     setSDCardMODE(false);
+    init_sd_card();
+    // write_to_sdcard();
+    // read_from_sdcard();
+    setSDCardMODE(true);
+    epad_init();
 
-    start_web_server();
     vTaskDelete(NULL);
 }
 
