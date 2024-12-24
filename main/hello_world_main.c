@@ -653,7 +653,7 @@ void epad_init()
     Paint_NewImage(Image, EPD_4IN0E_WIDTH, EPD_4IN0E_HEIGHT, 0, EPD_4IN0E_WHITE);   
     Paint_SetScale(6);
     Paint_SelectImage(Image);
-    Paint_Clear(EPD_4IN0E_BLACK);
+    Paint_Clear(EPD_4IN0E_WHITE);
     epd_display(Image);
     epd_sleep();
 
