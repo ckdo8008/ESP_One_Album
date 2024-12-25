@@ -463,8 +463,11 @@ void epd_display(const UBYTE *Image)
     uint16_t Height = EPD_4IN0E_HEIGHT;
 
     size_t buffer_size = Width * Height;
+    // ESP_LOGI("EPD", "buffer_size: %d %d", buffer_size, Width);
+    // ESP_LOG_BUFFER_HEXDUMP("EPD", Image, 32, ESP_LOG_INFO);
     lcd_cmd(epd_spi, 0x10, false);
     size_t offset = 0;
+    uint8_t *color_buffer = (uint8_t*)malloc(SOC_SPI_MAXIMUM_BUFFER_SIZE);
     while (offset < buffer_size) {
         // 남은 데이터 중에서 chunk 크기 결정
         size_t remain = buffer_size - offset;
@@ -473,10 +476,17 @@ void epd_display(const UBYTE *Image)
                             : remain;
 
         // color_buffer + offset 위치부터 chunk_size 바이트 전송
-        lcd_data(epd_spi, Image + offset, chunk_size);
+        for(int i=0; i<chunk_size; i++) {
+            color_buffer[i] = Image[offset + i];
+            // ESP_LOGI("EPD", "offset + i : %d", offset + i);
+        }
+
+        lcd_data(epd_spi, color_buffer, chunk_size);
+        // ESP_LOG_BUFFER_HEXDUMP("EPD", color_buffer, 16, ESP_LOG_INFO);
 
         offset += chunk_size;
     }  
+    free(color_buffer);
 
     epd_turnondisplay();  
 }
@@ -488,8 +498,8 @@ void epd_displaypart(const UBYTE *Image, UWORD xstart, UWORD ystart, UWORD image
                    : (EPD_4IN0E_WIDTH / 2 + 1);
     uint16_t Height = EPD_4IN0E_HEIGHT;
 
-    size_t buffer_size = Width * Height;
-    ESP_LOGI("EPD", "buffer_size: %d", buffer_size);
+    int buffer_size = Width * Height;
+    // ESP_LOGI("EPD", "buffer_size: %d %d", buffer_size, Width);
     uint8_t *color_buffer = (uint8_t*)malloc(buffer_size);
     if (!color_buffer) {
         ESP_LOGE("EPD", "Failed to allocate color_buffer");
@@ -519,6 +529,7 @@ void epd_displaypart(const UBYTE *Image, UWORD xstart, UWORD ystart, UWORD image
 
         // color_buffer + offset 위치부터 chunk_size 바이트 전송
         lcd_data(epd_spi, color_buffer + offset, chunk_size);
+        // ESP_LOG_BUFFER_HEXDUMP("EPD", color_buffer + offset, 16, ESP_LOG_INFO);
 
         offset += chunk_size;
     }
@@ -562,6 +573,7 @@ void epd_clear(uint8_t color)
 
         // color_buffer + offset 위치부터 chunk_size 바이트 전송
         lcd_data(epd_spi, color_buffer + offset, chunk_size);
+        // ESP_LOG_BUFFER_HEXDUMP("EPD", color_buffer + offset, 16, ESP_LOG_INFO);
 
         offset += chunk_size;
     }
@@ -648,13 +660,15 @@ void epad_init()
     // Paint_DrawString_EN(145, 140, "Waveshare", &Font16, EPD_4IN0E_BLACK, EPD_4IN0E_WHITE);
     // epd_displaypart(Image, 100, 150, 200, 200);
 
-    UWORD Imagesize = EPD_4IN0E_WIDTH * EPD_4IN0E_HEIGHT;
+    int Imagesize = ((EPD_4IN0E_WIDTH % 2 == 0)? (EPD_4IN0E_WIDTH / 2 ): (EPD_4IN0E_WIDTH / 2 + 1)) * EPD_4IN0E_HEIGHT;
     Image = (UBYTE *)malloc(Imagesize);
-    Paint_NewImage(Image, EPD_4IN0E_WIDTH, EPD_4IN0E_HEIGHT, 0, EPD_4IN0E_WHITE);   
+    Paint_NewImage(Image, EPD_4IN0E_WIDTH, EPD_4IN0E_HEIGHT, ROTATE_0, EPD_4IN0E_WHITE);
     Paint_SetScale(6);
     Paint_SelectImage(Image);
     Paint_Clear(EPD_4IN0E_WHITE);
     epd_display(Image);
+    // vTaskDelay(pdMS_TO_TICKS(5000));
+    // epd_displaypart(Image, 0, 0, EPD_4IN0E_WIDTH, EPD_4IN0E_HEIGHT);
     epd_sleep();
 
     free(Image);
