@@ -1,4 +1,29 @@
 dependencies:
+  espressif/libpng:
+    component_hash: d2fb0a8234e65fa7dd0bd80841e955c53557b70ef405dbb2290303ae2f4219bd
+    dependencies:
+    - name: espressif/zlib
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.2.13
+    - name: idf
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.6.39~1
+  espressif/zlib:
+    component_hash: d901723af51f13fc8e5824f39f32239c847956e8fd951a05266588dc5cfbb9ae
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.3.1
   idf:
     source:
       type: idf
@@ -11,8 +36,9 @@ dependencies:
       type: service
     version: 1.0.1
 direct_dependencies:
+- espressif/libpng
 - idf
 - zorxx/multipart-parser
-manifest_hash: 21cfea816146371da8c5ead0a18b1712b945257e884da601d1274709f53f7858
+manifest_hash: b6fe7b4cfd34e3ccf136863554abc1085d3191d3e5031ac9e8979ea1b152908e
 target: esp32
 version: 2.0.0

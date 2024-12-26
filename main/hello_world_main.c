@@ -35,10 +35,12 @@
 #include "Debug.h"
 #include "fonts.h"
 #include "GUI_Paint.h"
+#include "png.h"
 
 #define SLEEP_TIME_SEC 60  // 슬립 시간 (초 단위)
 #define RUN_TIME_SEC   60  // 런타임 (초 단위)
 #define INTERVAL_MS    10000 // 힙 메모리 표시 주기 (밀리초 단위)
+#define MAX_FILES 100
 
 // #define DEF_SSID "nurirobot"
 // #define DEF_PW "nuri0625"
@@ -98,6 +100,8 @@ static spi_device_handle_t sd_spi;
 #define EPD_4IN0E_BLUE    0x5   /// 101
 #define EPD_4IN0E_GREEN   0x6   /// 110
 
+int interval_seconds = 60;
+
 typedef struct {
     uint8_t cmd;
     uint8_t data[16];
@@ -128,6 +132,22 @@ DRAM_ATTR static const lcd_init_cmd_t epd_utils_cmds[] = {
     {0x07, {0x00}, 1},
     {0, {0}, 0xff},
 };
+
+typedef struct {
+    uint8_t r, g, b;  // 8비트 RGB
+    uint8_t idx4;     // e-Paper 4비트 컬러 인덱스
+} EPD_ColorMap;
+
+EPD_ColorMap g_color_table[] = {
+    {   0,   0,   0,  EPD_4IN0E_BLACK },  // Black
+    { 255, 255, 255,  EPD_4IN0E_WHITE },  // White
+    { 255, 255,   0,  EPD_4IN0E_YELLOW},  // Yellow
+    { 255,   0,   0,  EPD_4IN0E_RED   },  // Red
+    {   0,   0, 255,  EPD_4IN0E_BLUE  },  // Blue
+    {   0, 255,   0,  EPD_4IN0E_GREEN },  // Green
+    // 필요하다면 다른 색상(Gray 등) 추가 가능
+};
+const int g_color_count = sizeof(g_color_table) / sizeof(g_color_table[0]);
 
 struct file_server_data {
     /* Base path of file storage */
@@ -498,7 +518,7 @@ void epd_displaypart(const UBYTE *Image, UWORD xstart, UWORD ystart, UWORD image
                    : (EPD_4IN0E_WIDTH / 2 + 1);
     uint16_t Height = EPD_4IN0E_HEIGHT;
 
-    int buffer_size = Width * Height;
+    size_t buffer_size = Width * Height;
     // ESP_LOGI("EPD", "buffer_size: %d %d", buffer_size, Width);
     uint8_t *color_buffer = (uint8_t*)malloc(buffer_size);
     if (!color_buffer) {
@@ -660,7 +680,7 @@ void epad_init()
     // Paint_DrawString_EN(145, 140, "Waveshare", &Font16, EPD_4IN0E_BLACK, EPD_4IN0E_WHITE);
     // epd_displaypart(Image, 100, 150, 200, 200);
 
-    int Imagesize = ((EPD_4IN0E_WIDTH % 2 == 0)? (EPD_4IN0E_WIDTH / 2 ): (EPD_4IN0E_WIDTH / 2 + 1)) * EPD_4IN0E_HEIGHT;
+    size_t Imagesize = ((EPD_4IN0E_WIDTH % 2 == 0)? (EPD_4IN0E_WIDTH / 2 ): (EPD_4IN0E_WIDTH / 2 + 1)) * EPD_4IN0E_HEIGHT;
     Image = (UBYTE *)malloc(Imagesize);
     Paint_NewImage(Image, EPD_4IN0E_WIDTH, EPD_4IN0E_HEIGHT, ROTATE_0, EPD_4IN0E_WHITE);
     Paint_SetScale(6);
@@ -673,6 +693,53 @@ void epad_init()
 
     free(Image);
     vTaskDelay(pdMS_TO_TICKS(500));
+}
+
+int get_png_file_list(char **out_list, int max_count)
+{
+    DIR *dir = opendir(MOUNT_POINT);
+    if (!dir) {
+        ESP_LOGE(TAG, "Failed to open directory: %s", MOUNT_POINT);
+        return 0;
+    }
+
+    struct dirent *entry;
+    int count = 0;
+
+    while ((entry = readdir(dir)) != NULL) {
+        // entry->d_name: 파일/폴더 이름
+        if (entry->d_type == DT_REG) { // DT_REG: 일반 파일
+            // 확장자가 .png인지 확인
+            // const char *fname = entry->d_name;
+            char fname[248]; // +1 for null-terminator
+            strncpy(fname, entry->d_name, 247);
+            fname[247] = '\0';
+            const char *ext = strrchr(fname, '.'); // 뒤에서부터 '.' 검색
+            if (ext && strcasecmp(ext, ".png") == 0) {
+                // PNG 파일이면 목록에 저장
+                if (count < max_count) {
+                    // 메모리 할당 후 파일 경로를 저장해둔다
+                    // ex) /sdcard/image.png 처럼 full path로 저장
+                    char full_path[256];
+                    snprintf(full_path, sizeof(full_path), "/sdcard/%s", fname);
+
+                    out_list[count] = strdup(full_path); 
+                    // strdup()는 내부적으로 malloc()을 사용하므로 
+                    // 사용 후 free() 해야 함.
+
+                    ESP_LOGI(TAG, "Found PNG: %s", out_list[count]);
+                    count++;
+                } else {
+                    ESP_LOGW(TAG, "Max file count reached.");
+                    break;
+                }
+            }
+        }
+    }
+
+    closedir(dir);
+    return count;    
+
 }
 
 void read_from_sdcard()
@@ -730,12 +797,12 @@ void init_spiffs()
     ESP_LOGI(TAG, "SPIFFS 마운트 완료 - 총 크기: %d 바이트, 사용량: %d 바이트", total, used);
 
     // SPIFFS 파일 목록 출력
-    struct dirent *entry;
     DIR *dir = opendir("/spiffs");
     if (dir == NULL) {
         ESP_LOGE(TAG, "SPIFFS 디렉토리 열기 실패");
         return;
     }
+    // struct dirent *entry;
     // ESP_LOGI(TAG, "SPIFFS 파일 목록:");
     // while ((entry = readdir(dir)) != NULL) {
     //     ESP_LOGI(TAG, "  %s", entry->d_name);
@@ -979,6 +1046,278 @@ void start_web_server()
     }
 }
 
+bool read_png_file(const char *filename, uint8_t **out_data, int *width, int *height)
+{
+    // 파일 오픈
+    FILE *fp = fopen(filename, "rb");
+    if (!fp) {
+        ESP_LOGE(TAG, "Failed to open file: %s", filename);
+        return false;
+    }
+
+    // PNG 시그니처(8바이트) 확인
+    uint8_t header[8];
+    if (fread(header, 1, 8, fp) != 8) {
+        ESP_LOGE(TAG, "Failed to read PNG header: %s", filename);
+        fclose(fp);
+        return false;
+    }
+
+    if (png_sig_cmp(header, 0, 8)) {
+        ESP_LOGE(TAG, "Not a valid PNG file: %s", filename);
+        fclose(fp);
+        return false;
+    }
+
+    // libpng 구조체 생성
+    png_structp png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!png_ptr) {
+        ESP_LOGE(TAG, "png_create_read_struct failed");
+        fclose(fp);
+        return false;
+    }
+
+    png_infop info_ptr = png_create_info_struct(png_ptr);
+    if (!info_ptr) {
+        ESP_LOGE(TAG, "png_create_info_struct failed");
+        png_destroy_read_struct(&png_ptr, (png_infopp)NULL, (png_infopp)NULL);
+        fclose(fp);
+        return false;
+    }
+
+    // libpng 에러 처리를 위한 setjmp
+    if (setjmp(png_jmpbuf(png_ptr))) {
+        ESP_LOGE(TAG, "Error during PNG read");
+        png_destroy_read_struct(&png_ptr, &info_ptr, (png_infopp)NULL);
+        fclose(fp);
+        return false;
+    }
+
+    // IO 초기화
+    png_init_io(png_ptr, fp);
+    // 이미 헤더 8바이트를 읽었으므로 알려줌
+    png_set_sig_bytes(png_ptr, 8);
+
+    // PNG 정보 읽기
+    png_read_info(png_ptr, info_ptr);
+
+    // 이미지 기본 정보 획득
+    *width  = png_get_image_width(png_ptr, info_ptr);
+    *height = png_get_image_height(png_ptr, info_ptr);
+    int color_type = png_get_color_type(png_ptr, info_ptr);
+    int bit_depth  = png_get_bit_depth(png_ptr, info_ptr);
+
+    // 팔레트 PNG 또는 8비트 미만 Gray에 대한 확장
+    if (color_type == PNG_COLOR_TYPE_PALETTE) {
+        png_set_palette_to_rgb(png_ptr);  // 인덱스 → RGB 변환
+    }
+    if ((color_type == PNG_COLOR_TYPE_GRAY) && bit_depth < 8) {
+        png_set_expand_gray_1_2_4_to_8(png_ptr);
+    }
+    // tRNS 청크가 있으면 알파 채널로 확장
+    if (png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS)) {
+        png_set_tRNS_to_alpha(png_ptr);
+    }
+    // 16비트는 상위 8비트만 사용
+    if (bit_depth == 16) {
+        png_set_strip_16(png_ptr);
+    }
+    // Gray/Gray+Alpha를 RGB/RGBA로
+    if (color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_GRAY_ALPHA) {
+        png_set_gray_to_rgb(png_ptr);
+    }
+    // RGB → RGBA 변환 (알파가 없으면 투명도 1.0(0xFF) 채우기)
+    if (color_type == PNG_COLOR_TYPE_RGB ||
+        color_type == PNG_COLOR_TYPE_GRAY ||
+        color_type == PNG_COLOR_TYPE_PALETTE)
+    {
+        png_set_filler(png_ptr, 0xff, PNG_FILLER_AFTER);
+    }
+
+    // 설정 업데이트
+    png_read_update_info(png_ptr, info_ptr);
+
+    // 한 행(row)에 필요한 바이트 수
+    size_t row_bytes = png_get_rowbytes(png_ptr, info_ptr);
+
+    // 디코딩 결과 버퍼 할당 (RGBA: 4 bytes/pixel)
+    *out_data = (uint8_t *)malloc(row_bytes * (*height));
+    if (!*out_data) {
+        ESP_LOGE(TAG, "Failed to allocate memory for PNG");
+        png_destroy_read_struct(&png_ptr, &info_ptr, (png_infopp)NULL);
+        fclose(fp);
+        return false;
+    }
+
+    // 각 행(row)을 가리키는 배열
+    png_bytep *row_pointers = (png_bytep *)malloc(sizeof(png_bytep) * (*height));
+    if (!row_pointers) {
+        ESP_LOGE(TAG, "Failed to allocate row_pointers");
+        free(*out_data);
+        *out_data = NULL;
+        png_destroy_read_struct(&png_ptr, &info_ptr, (png_infopp)NULL);
+        fclose(fp);
+        return false;
+    }
+
+    // row_pointers에 실제 디코딩 버퍼를 연결
+    for (int y = 0; y < *height; y++) {
+        row_pointers[y] = (*out_data) + (y * row_bytes);
+    }
+
+    // 실제 이미지 읽기
+    png_read_image(png_ptr, row_pointers);
+
+    // 정리
+    free(row_pointers);
+    png_destroy_read_struct(&png_ptr, &info_ptr, (png_infopp)NULL);
+    fclose(fp);
+
+    ESP_LOGI(TAG, "PNG decoded: %s (%dx%d)", filename, *width, *height);
+    return true;
+}
+
+time_t get_rtc_time_in_seconds(void)
+{
+    // time() 함수 사용:
+    time_t now = 0;
+    time(&now);
+    return now;
+}
+
+uint8_t get_nearest_epd_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+{
+    // 알파가 매우 작으면 -> 흰색(또는 배경) 처리
+    if (a < 10) {
+        return EPD_4IN0E_WHITE;
+    }
+
+    int best_dist = 99999999;
+    uint8_t best_idx = EPD_4IN0E_WHITE; // 기본값 White
+    for (int i = 0; i < g_color_count; i++) {
+        int dr = (int)r - (int)g_color_table[i].r;
+        int dg = (int)g - (int)g_color_table[i].g;
+        int db = (int)b - (int)g_color_table[i].b;
+        int dist = (dr * dr) + (dg * dg) + (db * db);
+        if (dist < best_dist) {
+            best_dist = dist;
+            best_idx = g_color_table[i].idx4;
+        }
+    }
+    return best_idx;
+}
+
+void epad_disp_png(uint8_t *image, UWORD Rotate) 
+{
+    // Rotate는 
+    /*
+    #define ROTATE_0            0
+    #define ROTATE_90           90
+    */
+    // 이미지는 400, 600이 기본이다.
+    // RGBA 픽셀 데이터를 4bit 인덱스 컬러로 변경하는 코드
+    // 인덱스 코드는
+    /*
+    #define EPD_4IN0E_BLACK   0x0   /// 000
+    #define EPD_4IN0E_WHITE   0x1   /// 001
+    #define EPD_4IN0E_YELLOW  0x2   /// 010
+    #define EPD_4IN0E_RED     0x3   /// 011
+    #define EPD_4IN0E_BLUE    0x5   /// 101
+    #define EPD_4IN0E_GREEN   0x6   /// 110
+    */
+
+    uint16_t panel_w = EPD_4IN0E_WIDTH;   // 400
+    uint16_t panel_h = EPD_4IN0E_HEIGHT;  // 600
+
+    // 만약 회전이 90도라면 width<->height 뒤집힘
+    // (실제로는 e-Paper 컨트롤러가 지원하는 Rotate 레지스터를 쓸 수도 있지만
+    //  여기서는 소프트웨어적으로 픽셀 재배치만 가정)
+    if (Rotate == 90) {
+        panel_w = EPD_4IN0E_HEIGHT; // 600
+        panel_h = EPD_4IN0E_WIDTH;  // 400
+    }
+
+    // e-Paper는 2픽셀 = 1바이트 (4비트/픽셀)
+    // 가로 픽셀이 짝수이면 w/2, 홀수이면 w/2+1
+    uint16_t width_4b = (panel_w % 2 == 0) ? (panel_w / 2) : (panel_w / 2 + 1);
+    size_t   buf_size = width_4b * panel_h;
+
+    // 변환 후 저장할 버퍼
+    // 예: 400x600 => (400/2)x600 = 200x600 = 120,000 바이트
+    uint8_t *epd_buffer = (uint8_t *)malloc(buf_size);
+    if (!epd_buffer) {
+        ESP_LOGE("EPD", "epad_disp_png: Failed to allocate epd_buffer");
+        return;
+    }
+    memset(epd_buffer, 0x11, buf_size);
+
+    for (uint16_t y = 0; y < panel_h; y++) {
+        for (uint16_t x = 0; x < panel_w; x++) {
+            // RGBA 인덱스 계산
+            // 회전이 90도면 소프트웨어 매핑
+            uint16_t src_x = x;
+            uint16_t src_y = y;
+            if (Rotate == 90) {
+                // 90도 회전 -> 원본 이미지에서 (x,y)는 (panel_h-1-y, x)
+                src_x = panel_h - 1 - y;
+                src_y = x;
+            }
+            // RGBA8888에서 픽셀 위치
+            //   => (src_y*(panel_w) + src_x)*4
+            //   (단, 여기서는 실제 PNG 해상도가 panel_w×panel_h 라고 가정)
+            size_t idx_rgba = (src_y * panel_w + src_x) * 4;
+            uint8_t r = image[idx_rgba + 0];
+            uint8_t g = image[idx_rgba + 1];
+            uint8_t b = image[idx_rgba + 2];
+            uint8_t a = image[idx_rgba + 3];
+
+            // e-Paper 4비트 인덱스
+            uint8_t epd_col = get_nearest_epd_color(r, g, b, a);
+
+            // epd_buffer에 2픽셀당 1바이트로 저장
+            // ex) x=0 => 상위 nibble, x=1 => 하위 nibble
+            // (x/2) 번째 바이트의 ( (x%2)==0 => 상위 4비트 ) or (하위 4비트)
+            size_t idx_4b = (y * width_4b) + (x / 2); 
+            if ((x & 1) == 0) {
+                // 짝수 x -> 상위 nibble
+                epd_buffer[idx_4b] = (epd_col << 4) | (epd_buffer[idx_4b] & 0x0F);
+            } else {
+                // 홀수 x -> 하위 nibble
+                epd_buffer[idx_4b] = (epd_buffer[idx_4b] & 0xF0) | (epd_col & 0x0F);
+            }
+        }
+    }
+    epd_init();
+    epd_display(epd_buffer);
+    free(epd_buffer);
+    epd_sleep();
+}
+ 
+void display_png_file(const char *file_path)
+{
+    // TODO: 실제 PNG 디코딩 & 디스플레이 장치에 출력
+    // 예: lodepng + e-Paper 드라이버
+    ESP_LOGI("DISPLAY", "Displaying: %s", file_path);
+
+    uint8_t *image_data = NULL;
+    int width = 0, height = 0;
+
+    if (read_png_file(file_path, &image_data, &width, &height)) {
+        ESP_LOGI("MAIN", "PNG load success! w=%d, h=%d", width, height);
+        // image_data로부터 RGBA 픽셀 데이터를 활용
+        // 예: LCD에 뿌리거나, 추가 처리 등을 수행
+        if (width == EPD_4IN0E_WIDTH && height == EPD_4IN0E_HEIGHT) {
+            epad_disp_png(image_data, 0);
+        } else if (width == EPD_4IN0E_HEIGHT && height == EPD_4IN0E_WIDTH) {
+            epad_disp_png(image_data, 90);
+        }
+
+        // 사용 끝나면 free() 호출
+        free(image_data);
+    }    
+}
+
+
 // HTTP 서버 타스크
 void web_server_task(void *pvParameters)
 {
@@ -994,7 +1333,28 @@ void web_server_task(void *pvParameters)
     // write_to_sdcard();
     // read_from_sdcard();
     setSDCardMODE(true);
-    epad_init();
+
+    char *g_png_files[MAX_FILES];
+    int  g_png_count = get_png_file_list(g_png_files, MAX_FILES);
+    ESP_LOGI(TAG, "Found %d PNG files", g_png_count);
+
+
+    time_t now_sec = get_rtc_time_in_seconds();
+    if (g_png_count > 0) {
+        // index = ( now_sec / interval_seconds ) % g_file_count
+        uint64_t cycles = now_sec / interval_seconds; 
+        int index = cycles % g_png_count;
+
+        ESP_LOGI(TAG, "Current Time: %lld sec, cycles=%lld, index=%d",
+                (long long)now_sec, (long long)cycles, index);
+
+        // (2-1) 해당 파일 표시
+        display_png_file(g_png_files[index]);
+
+        // e-Paper 자체를 절전 모드로 전환
+        // epaper_sleep();
+    } 
+    // epad_init();
 
     vTaskDelete(NULL);
 }
