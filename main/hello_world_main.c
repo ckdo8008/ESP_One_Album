@@ -36,6 +36,7 @@
 #include "fonts.h"
 #include "GUI_Paint.h"
 #include "png.h"
+#include "mdns.h"
 
 #define SLEEP_TIME_SEC 60  // 슬립 시간 (초 단위)
 #define RUN_TIME_SEC   60  // 런타임 (초 단위)
@@ -1328,33 +1329,38 @@ void web_server_task(void *pvParameters)
 
     init_spiffs();
 
-    setSDCardMODE(false);
+    // setSDCardMODE(false);
     init_sd_card();
     // write_to_sdcard();
     // read_from_sdcard();
-    setSDCardMODE(true);
+    // setSDCardMODE(true);
+    TickType_t xLastWakeTime;
+    xLastWakeTime = xTaskGetTickCount();
 
     char *g_png_files[MAX_FILES];
     int  g_png_count = get_png_file_list(g_png_files, MAX_FILES);
     ESP_LOGI(TAG, "Found %d PNG files", g_png_count);
 
+    while(true) {
+        time_t now_sec = get_rtc_time_in_seconds();
+        if (g_png_count > 0) {
+            // index = ( now_sec / interval_seconds ) % g_file_count
+            uint64_t cycles = now_sec / interval_seconds; 
+            int index = cycles % g_png_count;
 
-    time_t now_sec = get_rtc_time_in_seconds();
-    if (g_png_count > 0) {
-        // index = ( now_sec / interval_seconds ) % g_file_count
-        uint64_t cycles = now_sec / interval_seconds; 
-        int index = cycles % g_png_count;
+            ESP_LOGI(TAG, "Current Time: %lld sec, cycles=%lld, index=%d",
+                    (long long)now_sec, (long long)cycles, index);
 
-        ESP_LOGI(TAG, "Current Time: %lld sec, cycles=%lld, index=%d",
-                (long long)now_sec, (long long)cycles, index);
+            // (2-1) 해당 파일 표시
+            display_png_file(g_png_files[index]);
 
-        // (2-1) 해당 파일 표시
-        display_png_file(g_png_files[index]);
+            // e-Paper 자체를 절전 모드로 전환
+            // epaper_sleep();
+        } 
+        // epad_init();
 
-        // e-Paper 자체를 절전 모드로 전환
-        // epaper_sleep();
-    } 
-    // epad_init();
+        vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS(30000));
+    }
 
     vTaskDelete(NULL);
 }
