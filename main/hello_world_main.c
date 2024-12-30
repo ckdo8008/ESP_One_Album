@@ -101,7 +101,10 @@ static spi_device_handle_t sd_spi;
 #define EPD_4IN0E_BLUE    0x5   /// 101
 #define EPD_4IN0E_GREEN   0x6   /// 110
 
+#define EXAMPLE_MDNS_INSTANCE CONFIG_MDNS_INSTANCE
+
 int interval_seconds = 60;
+int interval_seconds_onusb = 30;
 
 typedef struct {
     uint8_t cmd;
@@ -175,6 +178,72 @@ static wifi_config_t wifi_config2 = {
         // .threshold.authmode = WIFI_AUTH_WPA2_PSK, // 필요한 경우 인증 모드 설정
     },
 };
+
+char *generate_hostname(void)
+{
+#ifndef CONFIG_MDNS_ADD_MAC_TO_HOSTNAME
+    return strdup(CONFIG_MDNS_HOSTNAME);
+#else
+    uint8_t mac[6];
+    char   *hostname;
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    if (-1 == asprintf(&hostname, "%s-%02X%02X%02X", CONFIG_MDNS_HOSTNAME, mac[3], mac[4], mac[5])) {
+        abort();
+    }
+    return hostname;
+#endif
+}
+
+void initialise_mdns(void)
+{
+    char *hostname = generate_hostname();
+
+    //initialize mDNS
+    ESP_ERROR_CHECK( mdns_init() );
+    //set mDNS hostname (required if you want to advertise services)
+    ESP_ERROR_CHECK( mdns_hostname_set(hostname) );
+    ESP_LOGI(TAG, "mdns hostname set to: [%s]", hostname);
+    //set default mDNS instance name
+    ESP_ERROR_CHECK( mdns_instance_name_set(EXAMPLE_MDNS_INSTANCE) );
+
+    //structure with TXT records
+    mdns_txt_item_t serviceTxtData[3] = {
+        {"board", "esp32"},
+        {"u", "user"},
+        {"p", "password"}
+    };
+
+    //initialize service
+    ESP_ERROR_CHECK( mdns_service_add("ESP32-WebServer", "_http", "_tcp", 80, serviceTxtData, 3) );
+    ESP_ERROR_CHECK( mdns_service_subtype_add_for_host("ESP32-WebServer", "_http", "_tcp", NULL, "_server") );
+#if CONFIG_MDNS_MULTIPLE_INSTANCE
+    ESP_ERROR_CHECK( mdns_service_add("ESP32-WebServer1", "_http", "_tcp", 80, NULL, 0) );
+#endif
+
+#if CONFIG_MDNS_PUBLISH_DELEGATE_HOST
+    char *delegated_hostname;
+    if (-1 == asprintf(&delegated_hostname, "%s-delegated", hostname)) {
+        abort();
+    }
+
+    mdns_ip_addr_t addr4, addr6;
+    esp_netif_str_to_ip4("10.0.0.1", &addr4.addr.u_addr.ip4);
+    addr4.addr.type = ESP_IPADDR_TYPE_V4;
+    esp_netif_str_to_ip6("fd11:22::1", &addr6.addr.u_addr.ip6);
+    addr6.addr.type = ESP_IPADDR_TYPE_V6;
+    addr4.next = &addr6;
+    addr6.next = NULL;
+    ESP_ERROR_CHECK( mdns_delegate_hostname_add(delegated_hostname, &addr4) );
+    ESP_ERROR_CHECK( mdns_service_add_for_host("test0", "_http", "_tcp", delegated_hostname, 1234, serviceTxtData, 3) );
+    free(delegated_hostname);
+#endif // CONFIG_MDNS_PUBLISH_DELEGATE_HOST
+
+    //add another TXT item
+    ESP_ERROR_CHECK( mdns_service_txt_item_set("_http", "_tcp", "path", "/foobar") );
+    //change TXT item value
+    ESP_ERROR_CHECK( mdns_service_txt_item_set_with_explicit_value_len("_http", "_tcp", "u", "admin", strlen("admin")) );
+    free(hostname);
+}
 
 void lcd_cmd(spi_device_handle_t spi, const uint8_t cmd, bool keep_cs_active)
 {
@@ -966,6 +1035,34 @@ esp_err_t http_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+esp_err_t http_get_index_handler(httpd_req_t *req)
+{
+    char filepath[64 + 1024];
+    snprintf(filepath, sizeof(filepath), "/spiffs/index.html");
+
+    // 파일 열기
+    FILE *file = fopen(filepath, "r");
+    if (!file) {
+        ESP_LOGE(TAG, "파일 열기 실패: %s", filepath);
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "파일을 찾을 수 없습니다.");
+        return ESP_FAIL;
+    }
+
+    char buffer[512];
+    size_t read_bytes;
+    set_content_type_from_file(req, filepath);
+
+    // 파일 내용 전송
+    while ((read_bytes = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+        httpd_resp_send_chunk(req, buffer, read_bytes);
+    }
+    fclose(file);
+
+    // 응답 종료
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
 esp_err_t http_get_image_handler(httpd_req_t *req)
 {
     char filepath[64 + 1024];
@@ -1034,13 +1131,23 @@ void start_web_server()
         };
         httpd_register_uri_handler(server, &file_delete);        
 
+        httpd_uri_t get_index = {
+            .uri = "/", // 모든 요청 처리
+            .method = HTTP_GET,
+            .handler = http_get_index_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &get_index);
+
         httpd_uri_t get_uri = {
             .uri = "/*", // 모든 요청 처리
             .method = HTTP_GET,
             .handler = http_get_handler,
             .user_ctx = NULL
         };
-        httpd_register_uri_handler(server, &get_uri);        
+        httpd_register_uri_handler(server, &get_uri);  
+
+
         ESP_LOGI(TAG, "HTTP 서버가 실행 중입니다.");
     } else {
         ESP_LOGE(TAG, "HTTP 서버 시작 실패");
@@ -1234,63 +1341,101 @@ void epad_disp_png(uint8_t *image, UWORD Rotate)
     // (실제로는 e-Paper 컨트롤러가 지원하는 Rotate 레지스터를 쓸 수도 있지만
     //  여기서는 소프트웨어적으로 픽셀 재배치만 가정)
     if (Rotate == 90) {
-        panel_w = EPD_4IN0E_HEIGHT; // 600
-        panel_h = EPD_4IN0E_WIDTH;  // 400
-    }
+        uint16_t width_4b = (EPD_4IN0E_WIDTH % 2 == 0) ? (EPD_4IN0E_WIDTH / 2) : (EPD_4IN0E_WIDTH / 2 + 1);
+        size_t buf_size = width_4b * EPD_4IN0E_HEIGHT;
 
-    // e-Paper는 2픽셀 = 1바이트 (4비트/픽셀)
-    // 가로 픽셀이 짝수이면 w/2, 홀수이면 w/2+1
-    uint16_t width_4b = (panel_w % 2 == 0) ? (panel_w / 2) : (panel_w / 2 + 1);
-    size_t   buf_size = width_4b * panel_h;
+        uint8_t *epd_buffer = (uint8_t *)malloc(buf_size);
+        if (!epd_buffer) {
+            ESP_LOGE("EPD", "epad_disp_png: Failed to allocate epd_buffer");
+            return;
+        }
+        // epd_buffer 초기화
+        memset(epd_buffer, 0x11, buf_size);
 
-    // 변환 후 저장할 버퍼
-    // 예: 400x600 => (400/2)x600 = 200x600 = 120,000 바이트
-    uint8_t *epd_buffer = (uint8_t *)malloc(buf_size);
-    if (!epd_buffer) {
-        ESP_LOGE("EPD", "epad_disp_png: Failed to allocate epd_buffer");
-        return;
-    }
-    memset(epd_buffer, 0x11, buf_size);
+        for (uint16_t y = 0; y < EPD_4IN0E_WIDTH; y++) {
+            for (uint16_t x = 0; x < EPD_4IN0E_HEIGHT; x++) {
+                // RGBA8888에서 픽셀 위치 계산
+                size_t idx_rgba = (y * EPD_4IN0E_HEIGHT + (EPD_4IN0E_HEIGHT - 1 - x)) * 4;
+                uint8_t r = image[idx_rgba + 0];
+                uint8_t g = image[idx_rgba + 1];
+                uint8_t b = image[idx_rgba + 2];
+                uint8_t a = image[idx_rgba + 3];
 
-    for (uint16_t y = 0; y < panel_h; y++) {
-        for (uint16_t x = 0; x < panel_w; x++) {
-            // RGBA 인덱스 계산
-            // 회전이 90도면 소프트웨어 매핑
-            uint16_t src_x = x;
-            uint16_t src_y = y;
-            if (Rotate == 90) {
-                // 90도 회전 -> 원본 이미지에서 (x,y)는 (panel_h-1-y, x)
-                src_x = panel_h - 1 - y;
-                src_y = x;
-            }
-            // RGBA8888에서 픽셀 위치
-            //   => (src_y*(panel_w) + src_x)*4
-            //   (단, 여기서는 실제 PNG 해상도가 panel_w×panel_h 라고 가정)
-            size_t idx_rgba = (src_y * panel_w + src_x) * 4;
-            uint8_t r = image[idx_rgba + 0];
-            uint8_t g = image[idx_rgba + 1];
-            uint8_t b = image[idx_rgba + 2];
-            uint8_t a = image[idx_rgba + 3];
+                // e-Paper용 4비트 색상 값 계산
+                uint8_t epd_col = get_nearest_epd_color(r, g, b, a);
 
-            // e-Paper 4비트 인덱스
-            uint8_t epd_col = get_nearest_epd_color(r, g, b, a);
-
-            // epd_buffer에 2픽셀당 1바이트로 저장
-            // ex) x=0 => 상위 nibble, x=1 => 하위 nibble
-            // (x/2) 번째 바이트의 ( (x%2)==0 => 상위 4비트 ) or (하위 4비트)
-            size_t idx_4b = (y * width_4b) + (x / 2); 
-            if ((x & 1) == 0) {
-                // 짝수 x -> 상위 nibble
-                epd_buffer[idx_4b] = (epd_col << 4) | (epd_buffer[idx_4b] & 0x0F);
-            } else {
-                // 홀수 x -> 하위 nibble
-                epd_buffer[idx_4b] = (epd_buffer[idx_4b] & 0xF0) | (epd_col & 0x0F);
+                // epd_buffer에 2픽셀당 1바이트로 저장
+                size_t idx_4b = (x * width_4b) + (y / 2);
+                if ((y & 1) == 0) {
+                    // 짝수 x -> 상위 nibble
+                    epd_buffer[idx_4b] = (epd_col << 4) | (epd_buffer[idx_4b] & 0x0F);
+                } else {
+                    // 홀수 x -> 하위 nibble
+                    epd_buffer[idx_4b] = (epd_buffer[idx_4b] & 0xF0) | (epd_col & 0x0F);
+                }
             }
         }
+        epd_init();
+        epd_display(epd_buffer);
+        free(epd_buffer);
+
     }
-    epd_init();
-    epd_display(epd_buffer);
-    free(epd_buffer);
+    else {
+
+        // e-Paper는 2픽셀 = 1바이트 (4비트/픽셀)
+        // 가로 픽셀이 짝수이면 w/2, 홀수이면 w/2+1
+        uint16_t width_4b = (panel_w % 2 == 0) ? (panel_w / 2) : (panel_w / 2 + 1);
+        size_t   buf_size = width_4b * panel_h;
+
+        // 변환 후 저장할 버퍼
+        // 예: 400x600 => (400/2)x600 = 200x600 = 120,000 바이트
+        uint8_t *epd_buffer = (uint8_t *)malloc(buf_size);
+        if (!epd_buffer) {
+            ESP_LOGE("EPD", "epad_disp_png: Failed to allocate epd_buffer");
+            return;
+        }
+        memset(epd_buffer, 0x11, buf_size);
+
+        for (uint16_t y = 0; y < panel_h; y++) {
+            for (uint16_t x = 0; x < panel_w; x++) {
+                // RGBA 인덱스 계산
+                // 회전이 90도면 소프트웨어 매핑
+                uint16_t src_x = x;
+                uint16_t src_y = y;
+                if (Rotate == 90) {
+                    // 90도 회전 -> 원본 이미지에서 (x,y)는 (panel_h-1-y, x)
+                    src_x = panel_h - 1 - y;
+                    src_y = x;
+                }
+                // RGBA8888에서 픽셀 위치
+                //   => (src_y*(panel_w) + src_x)*4
+                //   (단, 여기서는 실제 PNG 해상도가 panel_w×panel_h 라고 가정)
+                size_t idx_rgba = (src_y * panel_w + src_x) * 4;
+                uint8_t r = image[idx_rgba + 0];
+                uint8_t g = image[idx_rgba + 1];
+                uint8_t b = image[idx_rgba + 2];
+                uint8_t a = image[idx_rgba + 3];
+
+                // e-Paper 4비트 인덱스
+                uint8_t epd_col = get_nearest_epd_color(r, g, b, a);
+
+                // epd_buffer에 2픽셀당 1바이트로 저장
+                // ex) x=0 => 상위 nibble, x=1 => 하위 nibble
+                // (x/2) 번째 바이트의 ( (x%2)==0 => 상위 4비트 ) or (하위 4비트)
+                size_t idx_4b = (y * width_4b) + (x / 2); 
+                if ((x & 1) == 0) {
+                    // 짝수 x -> 상위 nibble
+                    epd_buffer[idx_4b] = (epd_col << 4) | (epd_buffer[idx_4b] & 0x0F);
+                } else {
+                    // 홀수 x -> 하위 nibble
+                    epd_buffer[idx_4b] = (epd_buffer[idx_4b] & 0xF0) | (epd_col & 0x0F);
+                }
+            }
+        }
+        epd_init();
+        epd_display(epd_buffer);
+        free(epd_buffer);
+    }
     epd_sleep();
 }
  
@@ -1316,53 +1461,6 @@ void display_png_file(const char *file_path)
         // 사용 끝나면 free() 호출
         free(image_data);
     }    
-}
-
-
-// HTTP 서버 타스크
-void web_server_task(void *pvParameters)
-{
-    start_web_server();
-
-    gpio_init();
-    spi_init();
-
-    init_spiffs();
-
-    // setSDCardMODE(false);
-    init_sd_card();
-    // write_to_sdcard();
-    // read_from_sdcard();
-    // setSDCardMODE(true);
-    TickType_t xLastWakeTime;
-    xLastWakeTime = xTaskGetTickCount();
-
-    char *g_png_files[MAX_FILES];
-    int  g_png_count = get_png_file_list(g_png_files, MAX_FILES);
-    ESP_LOGI(TAG, "Found %d PNG files", g_png_count);
-
-    while(true) {
-        time_t now_sec = get_rtc_time_in_seconds();
-        if (g_png_count > 0) {
-            // index = ( now_sec / interval_seconds ) % g_file_count
-            uint64_t cycles = now_sec / interval_seconds; 
-            int index = cycles % g_png_count;
-
-            ESP_LOGI(TAG, "Current Time: %lld sec, cycles=%lld, index=%d",
-                    (long long)now_sec, (long long)cycles, index);
-
-            // (2-1) 해당 파일 표시
-            display_png_file(g_png_files[index]);
-
-            // e-Paper 자체를 절전 모드로 전환
-            // epaper_sleep();
-        } 
-        // epad_init();
-
-        vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS(30000));
-    }
-
-    vTaskDelete(NULL);
 }
 
 float read_battery_voltage(void)
@@ -1409,6 +1507,61 @@ float read_battery_voltage(void)
         ESP_LOGE(TAG, "ADC2 읽기 오류");
         return 0.0;
     }
+}
+
+// HTTP 서버 타스크
+void web_server_task(void *pvParameters)
+{
+    start_web_server();
+    // write_to_sdcard();
+    // read_from_sdcard();
+    // setSDCardMODE(true);
+    TickType_t xLastWakeTime;
+    xLastWakeTime = xTaskGetTickCount();
+
+    char *g_png_files[MAX_FILES];
+    int  g_png_count = 0;
+
+    while(true) {
+        // float battery_voltage = read_battery_voltage();
+        // ESP_LOGI(TAG, "배터리 전압: %.2f V", battery_voltage);
+
+        // if (battery_voltage <= 3.0)
+        // {
+        //     ESP_LOGI(TAG, "배터리 전압이 낮아 슬립 모드로 진입합니다.");
+
+        //     // 슬립 타이머 설정
+        //     esp_sleep_enable_timer_wakeup(SLEEP_TIME_SEC * 1000000ULL); // 마이크로초 단위
+        //     ESP_LOGI(TAG, "%d초 동안 깊은 슬립에 들어갑니다.", SLEEP_TIME_SEC);
+
+        //     // 깊은 슬립 시작
+        //     esp_deep_sleep_start();
+        // }
+
+        g_png_count = get_png_file_list(g_png_files, MAX_FILES);
+        ESP_LOGI(TAG, "Found %d PNG files", g_png_count);
+
+        time_t now_sec = get_rtc_time_in_seconds();
+        if (g_png_count > 0) {
+            // index = ( now_sec / interval_seconds ) % g_file_count
+            uint64_t cycles = now_sec / interval_seconds_onusb; 
+            int index = cycles % g_png_count;
+
+            ESP_LOGI(TAG, "Current Time: %lld sec, cycles=%lld, index=%d",
+                    (long long)now_sec, (long long)cycles, index);
+
+            // (2-1) 해당 파일 표시
+            display_png_file(g_png_files[index]);
+
+            // e-Paper 자체를 절전 모드로 전환
+            // epaper_sleep();
+        } 
+        // epad_init();
+
+        vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS(interval_seconds_onusb * 1000));
+    }
+
+    vTaskDelete(NULL);
 }
 
 // Wi-Fi 이벤트 핸들러
@@ -1564,12 +1717,29 @@ void check_battery_and_control_wifi(void)
     {
         ESP_LOGI(TAG, "배터리가 없습니다. 슬립 모드로 진입하지 않습니다.");
     }
-    else if (battery_voltage <= 3.1)
+    else if (battery_voltage <= 4.0)
     {
         ESP_LOGI(TAG, "배터리 전압이 낮아 슬립 모드로 진입합니다.");
+
+        char *g_png_files[MAX_FILES];
+        int  g_png_count = 0;
+
+        g_png_count = get_png_file_list(g_png_files, MAX_FILES);
+        ESP_LOGI(TAG, "Found %d PNG files", g_png_count);
+
+        time_t now_sec = get_rtc_time_in_seconds();
+        if (g_png_count > 0) {
+            uint64_t cycles = now_sec / interval_seconds; 
+            int index = cycles % g_png_count;
+
+            ESP_LOGI(TAG, "Current Time: %lld sec, cycles=%lld, index=%d",
+                    (long long)now_sec, (long long)cycles, index);
+
+            display_png_file(g_png_files[index]);
+        } 
+
         // 슬립 타이머 설정
         esp_sleep_enable_timer_wakeup(SLEEP_TIME_SEC * 1000000ULL); // 마이크로초 단위
-
         ESP_LOGI(TAG, "%d초 동안 깊은 슬립에 들어갑니다.", SLEEP_TIME_SEC);
 
         // 깊은 슬립 시작
@@ -1581,6 +1751,7 @@ void check_battery_and_control_wifi(void)
 
         // Wi-Fi 초기화 및 연결
         wifi_init();
+        initialise_mdns();
 
         // 시간 동기화
         obtain_time();
@@ -1604,6 +1775,14 @@ void app_main(void)
     // 시간대 설정 (한국 시간)
     setenv("TZ", "KST-9", 1);
     tzset();
+
+    gpio_init();
+    spi_init();
+
+    init_spiffs();
+
+    // setSDCardMODE(false);
+    init_sd_card();
 
     // 배터리 전압 확인 및 Wi-Fi 활성화 결정
     check_battery_and_control_wifi();
